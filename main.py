@@ -2,6 +2,18 @@ import os
 import tempfile
 import telebot
 import google.generativeai as genai
+from threading import Thread
+from flask import Flask
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+def run_flask():
+    app.run(host='0.0.0.0', port=10000)
+
+Thread(target=run_flask).start()
 
 # Инициализация токенов
 TG_TOKEN = os.environ.get("TG_TOKEN")
@@ -95,7 +107,7 @@ def handle_voice(message):
         chats[user_id].append({"role": "model", "parts": [response.text]})
         
         # 7. Отправляем ответ пользователю
-        bot.reply_to(message, response.text)
+        bot.infinity_polling(skip_pending=True)
         
         # 8. Удаляем временный файл
         os.unlink(tmp_path)
