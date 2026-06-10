@@ -42,7 +42,7 @@ SPANISH_PROMPT = (
 )
 
 model = genai.GenerativeModel(
-    model_name="gemini-3-flash",
+    model_name="gemini-3-flash-preview",
     system_instruction=SPANISH_PROMPT
 )
 
