@@ -57,7 +57,7 @@ SPANISH_PROMPT = (
 # Используем модель, которая умеет работать и с текстом, и с аудио
 try:
     model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash", 
+        model_name="gemini-pro", 
         system_instruction=SPANISH_PROMPT
     )
     logger.info("✅ Модель Gemini загружена успешно")
