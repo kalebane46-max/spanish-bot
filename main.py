@@ -6,8 +6,8 @@ from threading import Thread
 from flask import Flask
 import logging
 import time
-import requests
-import base64
+import asyncio
+import edge_tts
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -23,10 +23,13 @@ def run_flask():
 
 Thread(target=run_flask).start()
 
-# Токены
 TG_TOKEN = os.environ.get("TG_TOKEN")
 GEMINI_KEY = os.environ.get("GEMINI_KEY")
-ELEVENLABS_KEY = os.environ.get("ELEVENLABS_KEY")
+
+# Удаляем вебхук перед созданием бота
+import requests as req
+req.get(f"https://api.telegram.org/bot{TG_TOKEN}/deleteWebhook?drop_pending_updates=True")
+time.sleep(1)
 
 bot = telebot.TeleBot(TG_TOKEN)
 genai.configure(api_key=GEMINI_KEY)
@@ -38,7 +41,7 @@ SPANISH_PROMPT = (
     "(неважно, текстом или голосом), ты ОБЯЗАН:\n"
     "1. Сначала мягко исправить меня, написав правильный вариант.\n"
     "2. На русском языке кратко объяснить, в чем именно заключалась ошибка и какое правило здесь работает.\n"
-    "3. Ответить на мою реплику по существу на испанском языке, чтобы продолжить беседу."
+    "3. Ответить на мою реплику по существу на испанском языке, чтобы продолжить беседу.\n"
     "Объяснение ошибки всегда давай на русском языке."
 )
 
@@ -49,40 +52,43 @@ model = genai.GenerativeModel(
 
 chats = {}
 
-# Функция для создания голосового сообщения через ElevenLabs
-def text_to_speech(text, voice_id="pNInz6obpgDQGcFmaJgB"):
-    """
-    Преобразует текст в голосовое сообщение.
-    voice_id: Adam (мужской голос, хорошо звучит на испанском)
-    """
-    if not ELEVENLABS_KEY:
-        logger.warning("ELEVENLABS_KEY не найден, пропускаю озвучку")
-        return None
-    
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-    headers = {
-        "Accept": "audio/mpeg",
-        "Content-Type": "application/json",
-        "xi-api-key": ELEVENLABS_KEY
-    }
-    data = {
-        "text": text,
-        "model_id": "eleven_flash_2_5",  # Быстрая и бесплатная модель
-        "voice_settings": {
-            "stability": 0.5,
-            "similarity_boost": 0.7
-        }
-    }
-    
+# Функция озвучки через Microsoft Edge TTS (полностью бесплатно, без ключей)
+async def text_to_speech_async(text):
+    """Преобразует текст в голосовое сообщение используя Microsoft Edge TTS"""
     try:
-        response = requests.post(url, json=data, headers=headers, timeout=15)
-        if response.status_code == 200:
-            return response.content
-        else:
-            logger.error(f"ElevenLabs ошибка: {response.status_code} - {response.text}")
-            return None
+        # Испанский женский голос (можно заменить на мужской es-MX-JorgeNeural)
+        voice = "es-ES-ElviraNeural"
+        
+        # Создаем временный файл
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            output_path = tmp.name
+        
+        # Генерируем речь
+        communicate = edge_tts.Communicate(text, voice)
+        await communicate.save(output_path)
+        
+        # Читаем файл
+        with open(output_path, "rb") as f:
+            audio_data = f.read()
+        
+        # Удаляем временный файл
+        os.unlink(output_path)
+        
+        return audio_data
     except Exception as e:
-        logger.error(f"Ошибка ElevenLabs: {e}")
+        logger.error(f"Ошибка озвучки: {e}")
+        return None
+
+def text_to_speech(text):
+    """Обёртка для асинхронной функции"""
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(text_to_speech_async(text))
+        loop.close()
+        return result
+    except Exception as e:
+        logger.error(f"Ошибка TTS: {e}")
         return None
 
 @bot.message_handler(commands=['start', 'reset'])
@@ -101,20 +107,20 @@ def handle_text(message):
     chats[user_id].append({"role": "user", "parts": [message.text]})
         
     try:
-        logger.info(f"🤖 Запрос к Gemini...")
+        logger.info("🤖 Запрос к Gemini...")
         response = model.generate_content(chats[user_id])
         logger.info(f"✅ Ответ: {response.text[:50]}...")
         
         chats[user_id].append({"role": "model", "parts": [response.text]})
         
-        # Отправляем текстовый ответ
+        # Отправляем текст
         bot.reply_to(message, response.text)
         
-        # Отправляем голосовой ответ
+        # Отправляем голос (только испанскую часть, если есть)
         audio_data = text_to_speech(response.text)
         if audio_data:
             bot.send_voice(message.chat.id, audio_data)
-            logger.info("🎤 Голосовой ответ отправлен")
+            logger.info("🎤 Голосовое отправлено")
         
     except Exception as e:
         error_msg = str(e)
@@ -154,14 +160,14 @@ def handle_voice(message):
         chats[user_id].append({"role": "user", "parts": ["[Голосовое сообщение]"]})
         chats[user_id].append({"role": "model", "parts": [response.text]})
         
-        # Отправляем текстовый ответ
+        # Отправляем текст
         bot.reply_to(message, response.text)
         
-        # Отправляем голосовой ответ
+        # Отправляем голос
         audio_data = text_to_speech(response.text)
         if audio_data:
             bot.send_voice(message.chat.id, audio_data)
-            logger.info("🎤 Голосовой ответ отправлен")
+            logger.info("🎤 Голосовое отправлено")
         
         os.unlink(tmp_path)
         
@@ -171,13 +177,5 @@ def handle_voice(message):
         bot.reply_to(message, f"❌ {error_msg[:200]}")
 
 if __name__ == "__main__":
-    logger.info("🚀 Запуск бота...")
-    bot.remove_webhook()
-    time.sleep(2)
-    
-    while True:
-        try:
-            bot.infinity_polling(timeout=20, long_polling_timeout=10)
-        except Exception as e:
-            logger.error(f"❌ Ошибка соединения: {e}")
-            time.sleep(5)
+    logger.info("🚀 Бот запущен!")
+    bot.infinity_polling(timeout=30, long_polling_timeout=15)
