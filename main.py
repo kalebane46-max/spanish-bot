@@ -4,6 +4,12 @@ import telebot
 import google.generativeai as genai
 from threading import Thread
 from flask import Flask
+import logging
+
+# Настройка подробных логов
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
 
 @app.route('/')
@@ -15,12 +21,26 @@ def run_flask():
 
 Thread(target=run_flask).start()
 
-# Инициализация токенов
+# Инициализация токенов с проверкой
 TG_TOKEN = os.environ.get("TG_TOKEN")
 GEMINI_KEY = os.environ.get("GEMINI_KEY")
 
+# Проверка наличия ключей
+if not TG_TOKEN:
+    logger.error("❌ TG_TOKEN не найден в переменных окружения!")
+if not GEMINI_KEY:
+    logger.error("❌ GEMINI_KEY не найден в переменных окружения!")
+else:
+    logger.info(f"✅ GEMINI_KEY загружен, начинается на: {GEMINI_KEY[:10]}...")
+
 bot = telebot.TeleBot(TG_TOKEN)
-genai.configure(api_key=GEMINI_KEY)
+
+# Настройка Gemini
+try:
+    genai.configure(api_key=GEMINI_KEY)
+    logger.info("✅ Gemini API настроен успешно")
+except Exception as e:
+    logger.error(f"❌ Ошибка настройки Gemini API: {e}")
 
 # СТРОГАЯ ИНСТРУКЦИЯ ДЛЯ ПРЕПОДАВАТЕЛЯ ИСПАНСКОГО
 SPANISH_PROMPT = (
@@ -35,87 +55,98 @@ SPANISH_PROMPT = (
 )
 
 # Используем модель, которая умеет работать и с текстом, и с аудио
-model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash", 
-    system_instruction=SPANISH_PROMPT
-)
+try:
+    model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash", 
+        system_instruction=SPANISH_PROMPT
+    )
+    logger.info("✅ Модель Gemini загружена успешно")
+except Exception as e:
+    logger.error(f"❌ Ошибка загрузки модели: {e}")
+    model = None
 
-# Хранилище истории диалогов (текстовых) для каждого пользователя
+# Хранилище истории диалогов
 chats = {}
 
 # ОБРАБОТКА КОМАНД /start и /reset
 @bot.message_handler(commands=['start', 'reset'])
 def send_welcome(message):
-    chats[message.chat.id] = []  # Создаем пустую историю
+    chats[message.chat.id] = []
     bot.reply_to(message, "¡Hola! Soy tu profesor de español. ¿De qué te gustaría hablar hoy?\n(Привет! Я твой учитель испанского. О чем бы ты хотел поговорить?)")
 
-# ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ (ТОЛЬКО текст!)
+# ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
     user_id = message.chat.id
+    logger.info(f"📩 Получено текстовое сообщение от {user_id}: {message.text[:50]}...")
+    
     if user_id not in chats:
         chats[user_id] = []
     
     user_msg = message.text
-    
-    # Добавляем сообщение пользователя в историю
     chats[user_id].append({"role": "user", "parts": [user_msg]})
         
     try:
-        # Отправляем всю историю диалога в модель
+        if model is None:
+            raise Exception("Модель не загружена")
+        
+        logger.info("🤖 Отправляю запрос к Gemini API...")
         response = model.generate_content(chats[user_id])
+        logger.info("✅ Ответ от Gemini получен")
         
-        # Добавляем ответ модели в историю
         chats[user_id].append({"role": "model", "parts": [response.text]})
-        
         bot.reply_to(message, response.text)
+        
     except Exception as e:
-        bot.reply_to(message, "Lo siento, hubo un error. (Произошла ошибка, попробуй еще раз.)")
-        print(f"Ошибка: {e}")
+        error_msg = str(e)
+        logger.error(f"❌ Ошибка при обработке текста: {error_msg}")
+        
+        # Проверяем тип ошибки и даём понятный ответ
+        if "429" in error_msg or "quota" in error_msg.lower():
+            bot.reply_to(message, "Превышен лимит запросов к Gemini. Попробуй через минуту.")
+        elif "404" in error_msg or "not found" in error_msg.lower():
+            bot.reply_to(message, "Проблема с доступом к API Gemini. Проверь ключ или модель.")
+        else:
+            bot.reply_to(message, f"❌ Ошибка: {error_msg[:100]}")
 
 # ОБРАБОТКА ГОЛОСОВЫХ СООБЩЕНИЙ
 @bot.message_handler(content_types=['voice'])
 def handle_voice(message):
     user_id = message.chat.id
+    logger.info(f"🎤 Получено голосовое сообщение от {user_id}")
+    
     if user_id not in chats:
         chats[user_id] = []
         
     try:
-        # 1. Получаем информацию о файле голосового сообщения
         file_info = bot.get_file(message.voice.file_id)
-        # 2. Скачиваем аудиофайл в память
         downloaded_file = bot.download_file(file_info.file_path)
         
-        # 3. Создаем временный файл, чтобы правильно определить MIME-тип
         with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
             tmp.write(downloaded_file)
             tmp_path = tmp.name
 
-        # 4. Читаем данные из временного файла
         with open(tmp_path, "rb") as audio_file:
             audio_bytes = audio_file.read()
 
-        # 5. Запрос к Gemini специально для анализа аудио
         prompt = "Прослушай это голосовое сообщение от ученика и ответь согласно своей инструкции."
         response = model.generate_content([
             prompt,
             {"mime_type": "audio/ogg", "data": audio_bytes}
         ])
         
-        # 6. После получения ответа от модели, добавляем и запрос, и ответ в историю чата
         chats[user_id].append({"role": "user", "parts": ["[Голосовое сообщение]"]})
         chats[user_id].append({"role": "model", "parts": [response.text]})
         
-        # 7. Отправляем ответ пользователю
-        bot.infinity_polling(skip_pending=True)
-        
-        # 8. Удаляем временный файл
+        bot.reply_to(message, response.text)
         os.unlink(tmp_path)
         
     except Exception as e:
-        bot.reply_to(message, "Не удалось обработать голосовое сообщение. Попробуй сказать четче или написать текстом.")
-        print(f"Ошибка обработки голосового: {e}")
+        error_msg = str(e)
+        logger.error(f"❌ Ошибка обработки голосового: {error_msg}")
+        bot.reply_to(message, f"❌ Ошибка голосового: {error_msg[:100]}")
 
 # Запуск бота
 if __name__ == "__main__":
-    bot.infinity_polling()
+    logger.info("🚀 Запуск бота...")
+    bot.infinity_polling(skip_pending=True)
